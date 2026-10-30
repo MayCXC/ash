@@ -9,6 +9,7 @@ defmodule Ash.DataLayer.EtsTest do
   alias Ash.DataLayer.Ets.Query
   import Ash.Test
 
+  require Ash.Expr
   require Ash.Query
 
   setup do
@@ -136,6 +137,28 @@ defmodule Ash.DataLayer.EtsTest do
     end
   end
 
+  defmodule EtsUpsertedSecret do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets
+
+    ets do
+      private? true
+    end
+
+    actions do
+      defaults [:read, create: :*]
+    end
+
+    identities do
+      identity :unique_name, [:name], pre_check_with: Domain
+    end
+
+    attributes do
+      uuid_primary_key :id
+      attribute :name, :string, public?: true
+      attribute :token, :string, public?: true, sensitive?: true
+    end
+  end
+
   defmodule EtsSecretKey do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets
 
@@ -245,6 +268,27 @@ defmodule Ash.DataLayer.EtsTest do
 
       assert log =~ "first name"
       refute log =~ "first token"
+      refute log =~ "second token"
+    end
+
+    test "a bulk upsert is logged as one, with the value its condition compares redacted" do
+      Ash.bulk_create!([%{name: "upserted", token: "first token"}], EtsUpsertedSecret, :create)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Ash.bulk_create!(
+            [%{name: "upserted", token: "second token"}],
+            EtsUpsertedSecret,
+            :create,
+            upsert?: true,
+            upsert_identity: :unique_name,
+            upsert_fields: [:token],
+            upsert_condition: Ash.Expr.expr(token == "condition token")
+          )
+        end)
+
+      assert log =~ "Upserting 1"
+      refute log =~ "condition token"
       refute log =~ "second token"
     end
 

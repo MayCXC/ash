@@ -879,31 +879,8 @@ defmodule Ash.DataLayer.Mnesia do
 
   defp log_bulk_create(resource, stream, options) do
     Logger.debug(
-      "Mnesia: #{bulk_create_operation(options, stream)} #{inspect(resource)}:\n\n#{Enum.map_join(stream, "\n", &Ash.DataLayer.Ets.format_changes(&1, from_bulk_create?: true))}"
+      "Mnesia: #{Ash.DataLayer.Ets.bulk_create_operation(resource, options, stream)} #{inspect(resource)}:\n\n#{Enum.map_join(stream, "\n", &Ash.DataLayer.Ets.format_changes(&1, from_bulk_create?: true))}"
     )
-  end
-
-  defp bulk_create_operation(
-         %{
-           upsert?: true,
-           upsert_keys: upsert_keys,
-           upsert_fields: upsert_fields,
-           upsert_where: expr
-         },
-         stream
-       ) do
-    where_expr =
-      if is_nil(expr) do
-        ""
-      else
-        "where #{inspect(expr)}"
-      end
-
-    "Upserting #{Enum.count(stream)} on #{inspect(upsert_keys)} #{where_expr}, setting #{inspect(List.wrap(upsert_fields))}"
-  end
-
-  defp bulk_create_operation(_options, stream) do
-    "Creating #{Enum.count(stream)}"
   end
 
   defp log_create(resource, changeset) do

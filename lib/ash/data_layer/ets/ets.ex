@@ -2977,31 +2977,37 @@ defmodule Ash.DataLayer.Ets do
 
   defp log_bulk_create(resource, stream, options) do
     Logger.debug(
-      "#{bulk_create_operation(options, stream)} #{inspect(resource)}:\n\n#{Enum.map_join(stream, "\n", &format_changes(&1, from_bulk_create?: true))}"
+      "#{bulk_create_operation(resource, options, stream)} #{inspect(resource)}:\n\n#{Enum.map_join(stream, "\n", &format_changes(&1, from_bulk_create?: true))}"
     )
   end
 
-  defp bulk_create_operation(
-         %{
-           upsert?: true,
-           upsert_keys: upsert_keys,
-           upsert_fields: upsert_fields,
-           upsert_where: expr
-         },
-         stream
-       ) do
+  @doc false
+  # What a bulk create's debug log says it does. An upsert's condition is shown as a
+  # filter of the resource, whose inspect redacts a value compared with a sensitive
+  # attribute.
+  def bulk_create_operation(
+        resource,
+        %{upsert?: true, upsert_keys: upsert_keys, upsert_fields: upsert_fields} = options,
+        stream
+      ) do
     where_expr =
-      if is_nil(expr) do
-        ""
-      else
-        "where #{inspect(expr)}"
+      case Map.get(options, :upsert_condition) do
+        nil -> ""
+        condition -> " where #{inspect_condition(resource, condition)}"
       end
 
-    "Upserting #{Enum.count(stream)} on #{inspect(upsert_keys)} #{where_expr}, setting #{inspect(List.wrap(upsert_fields))}"
+    "Upserting #{Enum.count(stream)} on #{inspect(upsert_keys)}#{where_expr}, setting #{inspect(List.wrap(upsert_fields))}"
   end
 
-  defp bulk_create_operation(_options, stream) do
+  def bulk_create_operation(_resource, _options, stream) do
     "Creating #{Enum.count(stream)}"
+  end
+
+  defp inspect_condition(resource, condition) do
+    case Ash.Filter.parse(resource, condition) do
+      {:ok, filter} -> inspect(filter)
+      {:error, _} -> inspect(Ash.Helpers.redact(condition))
+    end
   end
 
   defp log_destroy_query(resource, query) do

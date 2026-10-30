@@ -8,6 +8,8 @@ defmodule Ash.DataLayer.MnesiaTest do
   alias Ash.DataLayer.Mnesia, as: MnesiaDataLayer
   alias Ash.Test.Domain, as: Domain
 
+  require Ash.Expr
+
   @default_test_table :test_users
 
   setup_all do
@@ -20,7 +22,7 @@ defmodule Ash.DataLayer.MnesiaTest do
   @no_pkey_test_table :test_events
   @tenant_test_table :test_tenant_tickets
   @lock_test_tables [:test_lock_posts, :test_lock_notes]
-  @logging_test_tables [:test_secrets, :test_secret_keys, :test_positions]
+  @logging_test_tables [:test_secrets, :test_upserted_secrets, :test_secret_keys, :test_positions]
 
   setup do
     # Clean up any existing tables before each test
@@ -235,6 +237,28 @@ defmodule Ash.DataLayer.MnesiaTest do
     end
   end
 
+  defmodule MnesiaUpsertedSecret do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Mnesia
+
+    mnesia do
+      table :test_upserted_secrets
+    end
+
+    actions do
+      defaults [:read, create: :*]
+    end
+
+    identities do
+      identity :unique_name, [:name], pre_check_with: Domain
+    end
+
+    attributes do
+      uuid_primary_key :id
+      attribute :name, :string, public?: true
+      attribute :token, :string, public?: true, sensitive?: true
+    end
+  end
+
   defmodule MnesiaSecretKey do
     use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Mnesia
 
@@ -329,6 +353,27 @@ defmodule Ash.DataLayer.MnesiaTest do
 
       assert log =~ "first name"
       refute log =~ "first token"
+      refute log =~ "second token"
+    end
+
+    test "a bulk upsert is logged as one, with the value its condition compares redacted" do
+      Ash.bulk_create!([%{name: "upserted", token: "first token"}], MnesiaUpsertedSecret, :create)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Ash.bulk_create!(
+            [%{name: "upserted", token: "second token"}],
+            MnesiaUpsertedSecret,
+            :create,
+            upsert?: true,
+            upsert_identity: :unique_name,
+            upsert_fields: [:token],
+            upsert_condition: Ash.Expr.expr(token == "condition token")
+          )
+        end)
+
+      assert log =~ "Upserting 1"
+      refute log =~ "condition token"
       refute log =~ "second token"
     end
 
