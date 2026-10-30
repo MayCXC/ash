@@ -8,6 +8,8 @@ defmodule Ash.DataLayer.MnesiaTest do
   alias Ash.DataLayer.Mnesia, as: MnesiaDataLayer
   alias Ash.Test.Domain, as: Domain
 
+  require Ash.Expr
+
   @default_test_table :test_users
 
   setup_all do
@@ -20,14 +22,16 @@ defmodule Ash.DataLayer.MnesiaTest do
   @no_pkey_test_table :test_events
   @tenant_test_table :test_tenant_tickets
   @lock_test_tables [:test_lock_posts, :test_lock_notes]
+  @logging_test_tables [:test_secrets, :test_upserted_secrets, :test_secret_keys, :test_positions]
 
   setup do
     # Clean up any existing tables before each test
-    for table <- [
-          @default_test_table,
-          @no_pkey_test_table,
-          @tenant_test_table | @lock_test_tables
-        ] do
+    for table <-
+          [
+            @default_test_table,
+            @no_pkey_test_table,
+            @tenant_test_table | @lock_test_tables
+          ] ++ @logging_test_tables do
       try do
         :mnesia.delete_table(table)
       catch
@@ -40,7 +44,7 @@ defmodule Ash.DataLayer.MnesiaTest do
     :mnesia.create_table(@no_pkey_test_table, attributes: [:id, :val])
     :mnesia.create_table(@tenant_test_table, attributes: [:id, :val])
 
-    for table <- @lock_test_tables do
+    for table <- @lock_test_tables ++ @logging_test_tables do
       :mnesia.create_table(table, attributes: [:id, :val])
     end
 
@@ -205,6 +209,203 @@ defmodule Ash.DataLayer.MnesiaTest do
 
     attributes do
       attribute :name, :string, public?: true
+    end
+  end
+
+  defmodule MnesiaSecret do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Mnesia
+
+    import Ash.Expr
+
+    mnesia do
+      table :test_secrets
+    end
+
+    actions do
+      defaults [:read, :destroy, create: :*, update: :*]
+
+      update :rotate do
+        argument :token, :string, allow_nil?: false
+        change atomic_update(:token, expr(^arg(:token)))
+      end
+    end
+
+    attributes do
+      uuid_primary_key :id
+      attribute :name, :string, public?: true
+      attribute :token, :string, public?: true, sensitive?: true
+    end
+  end
+
+  defmodule MnesiaUpsertedSecret do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Mnesia
+
+    mnesia do
+      table :test_upserted_secrets
+    end
+
+    actions do
+      defaults [:read, create: :*]
+    end
+
+    identities do
+      identity :unique_name, [:name], pre_check_with: Domain
+    end
+
+    attributes do
+      uuid_primary_key :id
+      attribute :name, :string, public?: true
+      attribute :token, :string, public?: true, sensitive?: true
+    end
+  end
+
+  defmodule MnesiaSecretKey do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Mnesia
+
+    mnesia do
+      table :test_secret_keys
+    end
+
+    actions do
+      defaults [:read, create: :*, update: :*]
+    end
+
+    attributes do
+      attribute :key, :string,
+        primary_key?: true,
+        allow_nil?: false,
+        public?: true,
+        sensitive?: true
+
+      attribute :name, :string, public?: true
+    end
+  end
+
+  defmodule MnesiaPosition do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Mnesia
+
+    import Ash.Expr
+
+    mnesia do
+      table :test_positions
+    end
+
+    actions do
+      defaults [:read]
+
+      create :create, accept: [:unrealized_pnl]
+
+      update :add_pnl do
+        change atomic_update(
+                 :unrealized_pnl,
+                 expr(unrealized_pnl + ^Decimal.new("0.0816"))
+               )
+      end
+    end
+
+    attributes do
+      uuid_primary_key :id
+      attribute :unrealized_pnl, :decimal, allow_nil?: false, public?: true
+    end
+  end
+
+  describe "debug logging" do
+    setup do
+      previous_level = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: previous_level) end)
+    end
+
+    test "a create, an update and an atomic update log a sensitive attribute redacted" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          MnesiaSecret
+          |> Ash.Changeset.for_create(:create, %{
+            name: "named at create",
+            token: "token at create"
+          })
+          |> Ash.create!()
+          |> Ash.Changeset.for_update(:update, %{token: "token at update"})
+          |> Ash.update!()
+          |> Ash.Changeset.for_update(:rotate, %{token: "token at rotate"})
+          |> Ash.update!()
+        end)
+
+      assert log =~ "named at create"
+      assert log =~ ~s(token: "**redacted**")
+      refute log =~ "token at create"
+      refute log =~ "token at update"
+      refute log =~ "token at rotate"
+    end
+
+    test "a bulk create logs a sensitive attribute redacted" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Ash.bulk_create!(
+            [
+              %{name: "first name", token: "first token"},
+              %{name: "second name", token: "second token"}
+            ],
+            MnesiaSecret,
+            :create
+          )
+        end)
+
+      assert log =~ "first name"
+      refute log =~ "first token"
+      refute log =~ "second token"
+    end
+
+    test "a bulk upsert is logged as one, with the value its condition compares redacted" do
+      Ash.bulk_create!([%{name: "upserted", token: "first token"}], MnesiaUpsertedSecret, :create)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Ash.bulk_create!(
+            [%{name: "upserted", token: "second token"}],
+            MnesiaUpsertedSecret,
+            :create,
+            upsert?: true,
+            upsert_identity: :unique_name,
+            upsert_fields: [:token],
+            upsert_condition: Ash.Expr.expr(token == "condition token")
+          )
+        end)
+
+      assert log =~ "Upserting 1"
+      refute log =~ "condition token"
+      refute log =~ "second token"
+    end
+
+    test "an update logs a sensitive primary key redacted" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          MnesiaSecretKey
+          |> Ash.Changeset.for_create(:create, %{key: "key value", name: "before"})
+          |> Ash.create!()
+          |> Ash.Changeset.for_update(:update, %{name: "after"})
+          |> Ash.update!()
+        end)
+
+      assert log =~ "after"
+      refute log =~ "key value"
+    end
+
+    test "an atomic update with a struct in its expression is logged" do
+      position =
+        MnesiaPosition
+        |> Ash.Changeset.for_create(:create, %{unrealized_pnl: Decimal.new("1.0")})
+        |> Ash.create!()
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          position
+          |> Ash.Changeset.for_update(:add_pnl, %{})
+          |> Ash.update!()
+        end)
+
+      refute log =~ "Failed to format changes"
+      assert log =~ "0.0816"
     end
   end
 
