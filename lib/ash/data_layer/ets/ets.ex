@@ -3028,7 +3028,7 @@ defmodule Ash.DataLayer.Ets do
 
     filter =
       if query.filter && query.filter.expression != nil do
-        " where `#{inspect(query.filter.expression)}`"
+        " where `#{inspect(query.filter)}`"
       else
         ""
       end
@@ -3064,7 +3064,7 @@ defmodule Ash.DataLayer.Ets do
 
     filter =
       if query.filter && query.filter.expression != nil do
-        " matching filter `#{inspect(query.filter.expression)}`"
+        " matching filter `#{inspect(query.filter)}`"
       else
         ""
       end
@@ -3087,21 +3087,32 @@ defmodule Ash.DataLayer.Ets do
   end
 
   defp log_update(resource, pkey, changeset) do
-    pkey =
-      if Enum.count_until(pkey, 2) == 2 do
-        inspect(pkey)
-      else
-        inspect(pkey |> Enum.at(0) |> elem(1))
-      end
-
     Logger.debug("""
-    "Updating #{inspect(resource)} #{pkey}:
+    Updating #{inspect(resource)} #{format_pkey(resource, pkey)}:
 
     #{format_changes(changeset)}
     """)
   end
 
-  defp format_changes(changeset, opts \\ []) do
+  @doc false
+  # A record's primary key as an update's debug log names it: the value alone for a
+  # single-field key. A sensitive field's value is redacted, as a record's inspect
+  # leaves it out.
+  def format_pkey(resource, pkey) do
+    redacted = Enum.map(pkey, fn {name, value} -> {name, redact(resource, name, value)} end)
+
+    case redacted do
+      [{_name, value}] -> inspect(value)
+      redacted when is_map(pkey) -> inspect(Map.new(redacted))
+      redacted -> inspect(redacted)
+    end
+  end
+
+  @doc false
+  # The attributes and atomics a changeset writes, as the data layers' debug logs show
+  # them. A sensitive attribute's value is redacted, as `Ash.Changeset`'s inspect
+  # redacts a sensitive argument.
+  def format_changes(changeset, opts \\ []) do
     prefix =
       if opts[:from_bulk_create?] do
         ""
@@ -3122,6 +3133,8 @@ defmodule Ash.DataLayer.Ets do
         "}",
         inspect_opts,
         fn {k, v}, _opts ->
+          v = redact(changeset.resource, k, v)
+
           v =
             if Ash.Expr.expr?(v) do
               Ash.Filter.map(v, fn nested ->
@@ -3157,6 +3170,13 @@ defmodule Ash.DataLayer.Ets do
   rescue
     e ->
       "Failed to format changes: #{Exception.message(e)}"
+  end
+
+  defp redact(resource, name, value) do
+    case Ash.Resource.Info.attribute(resource, name) do
+      %{sensitive?: true} -> Ash.Helpers.redact(value)
+      _ -> value
+    end
   end
 
   defp truncate_unless_expr(nested, inspect_opts) do

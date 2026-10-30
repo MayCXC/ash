@@ -111,6 +111,53 @@ defmodule Ash.DataLayer.EtsTest do
     end
   end
 
+  defmodule EtsSecret do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets
+
+    import Ash.Expr
+
+    ets do
+      private? true
+    end
+
+    actions do
+      defaults [:read, :destroy, create: :*, update: :*]
+
+      update :rotate do
+        argument :token, :string, allow_nil?: false
+        change atomic_update(:token, expr(^arg(:token)))
+      end
+    end
+
+    attributes do
+      uuid_primary_key :id
+      attribute :name, :string, public?: true
+      attribute :token, :string, public?: true, sensitive?: true
+    end
+  end
+
+  defmodule EtsSecretKey do
+    use Ash.Resource, domain: Domain, data_layer: Ash.DataLayer.Ets
+
+    ets do
+      private? true
+    end
+
+    actions do
+      defaults [:read, create: :*, update: :*]
+    end
+
+    attributes do
+      attribute :key, :string,
+        primary_key?: true,
+        allow_nil?: false,
+        public?: true,
+        sensitive?: true
+
+      attribute :name, :string, public?: true
+    end
+  end
+
   test "won't compile with identities that don't precheck" do
     output =
       ExUnit.CaptureIO.capture_io(:stderr, fn ->
@@ -152,6 +199,89 @@ defmodule Ash.DataLayer.EtsTest do
 
     refute log =~ "Failed to format changes"
     assert log =~ "0.0816"
+  end
+
+  describe "debug logging of a sensitive attribute" do
+    setup do
+      previous_level = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: previous_level) end)
+    end
+
+    test "a create, an update and an atomic update log its value redacted" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          EtsSecret
+          |> Ash.Changeset.for_create(:create, %{
+            name: "named at create",
+            token: "token at create"
+          })
+          |> Ash.create!()
+          |> Ash.Changeset.for_update(:update, %{token: "token at update"})
+          |> Ash.update!()
+          |> Ash.Changeset.for_update(:rotate, %{token: "token at rotate"})
+          |> Ash.update!()
+        end)
+
+      assert log =~ "named at create"
+      assert log =~ ~s(token: "**redacted**")
+      refute log =~ "token at create"
+      refute log =~ "token at update"
+      refute log =~ "token at rotate"
+    end
+
+    test "a bulk create logs its value redacted" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Ash.bulk_create!(
+            [
+              %{name: "first name", token: "first token"},
+              %{name: "second name", token: "second token"}
+            ],
+            EtsSecret,
+            :create
+          )
+        end)
+
+      assert log =~ "first name"
+      refute log =~ "first token"
+      refute log =~ "second token"
+    end
+
+    test "an update and a destroy matching on it log the value they match redacted" do
+      EtsSecret
+      |> Ash.Changeset.for_create(:create, %{name: "matched", token: "token to match"})
+      |> Ash.create!()
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          EtsSecret
+          |> Ash.Query.filter(token == "token to match")
+          |> Ash.bulk_update!(:update, %{name: "renamed"}, strategy: :atomic)
+
+          EtsSecret
+          |> Ash.Query.filter(token == "token to match")
+          |> Ash.bulk_destroy!(:destroy, %{}, strategy: :atomic)
+        end)
+
+      assert log =~ "ETS: Updating"
+      assert log =~ "ETS: Destroying"
+      refute log =~ "token to match"
+    end
+
+    test "an update logs a sensitive primary key redacted" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          EtsSecretKey
+          |> Ash.Changeset.for_create(:create, %{key: "key value", name: "before"})
+          |> Ash.create!()
+          |> Ash.Changeset.for_update(:update, %{name: "after"})
+          |> Ash.update!()
+        end)
+
+      assert log =~ "after"
+      refute log =~ "key value"
+    end
   end
 
   test "resource_to_query" do

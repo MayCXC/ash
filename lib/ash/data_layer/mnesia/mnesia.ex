@@ -879,7 +879,7 @@ defmodule Ash.DataLayer.Mnesia do
 
   defp log_bulk_create(resource, stream, options) do
     Logger.debug(
-      "Mnesia: #{bulk_create_operation(options, stream)} #{inspect(resource)}:\n\n#{Enum.map_join(stream, "\n", &format_changes(&1, from_bulk_create?: true))}"
+      "Mnesia: #{bulk_create_operation(options, stream)} #{inspect(resource)}:\n\n#{Enum.map_join(stream, "\n", &Ash.DataLayer.Ets.format_changes(&1, from_bulk_create?: true))}"
     )
   end
 
@@ -910,123 +910,16 @@ defmodule Ash.DataLayer.Mnesia do
     Logger.debug("""
     Mnesia: Creating #{inspect(resource)}:
 
-    #{format_changes(changeset)}
+    #{Ash.DataLayer.Ets.format_changes(changeset)}
     """)
   end
 
   defp log_update(resource, pkey, changeset) do
-    pkey =
-      if Enum.count_until(pkey, 2) == 2 do
-        inspect(pkey)
-      else
-        inspect(pkey |> Enum.at(0) |> elem(1))
-      end
-
     Logger.debug("""
-    Mnesia: Updating #{inspect(resource)} #{pkey}:
+    Mnesia: Updating #{inspect(resource)} #{Ash.DataLayer.Ets.format_pkey(resource, pkey)}:
 
-    #{format_changes(changeset)}
+    #{Ash.DataLayer.Ets.format_changes(changeset)}
     """)
-  end
-
-  defp format_changes(changeset, opts \\ []) do
-    prefix =
-      if opts[:from_bulk_create?] do
-        ""
-      else
-        "Setting "
-      end
-
-    inspect_opts = %Inspect.Opts{
-      limit: 10,
-      printable_limit: 36,
-      pretty: true
-    }
-
-    doc =
-      Inspect.Algebra.container_doc(
-        "%{",
-        Enum.uniq_by(Enum.to_list(changeset.attributes) ++ changeset.atomics, &elem(&1, 0)),
-        "}",
-        inspect_opts,
-        fn {k, v}, _opts ->
-          v =
-            if Ash.Expr.expr?(v) do
-              Ash.Filter.map(v, fn nested ->
-                truncate_unless_expr(nested, inspect_opts)
-              end)
-              |> inspect(
-                limit: inspect_opts.limit,
-                printable_limit: inspect_opts.printable_limit,
-                pretty: true
-              )
-            else
-              truncate_inspect(v, inspect_opts)
-            end
-
-          # Create the value document from the truncated string
-          value_doc = Inspect.Algebra.string(v)
-          Inspect.Algebra.concat([to_string(k), ": ", value_doc])
-        end,
-        separator: ",",
-        break: :flex
-      )
-
-    # Format the document to a string with proper line breaks
-    result = Inspect.Algebra.format(doc, inspect_opts.width) |> IO.iodata_to_binary()
-    prefix <> result
-  rescue
-    e ->
-      "Failed to format changes: #{Exception.message(e)}"
-  end
-
-  defp truncate_unless_expr(nested, inspect_opts) do
-    if Ash.Expr.expr?(nested) do
-      nested
-    else
-      cond do
-        is_atom(nested) ->
-          nested
-
-        is_binary(nested) ->
-          truncate(nested, inspect_opts)
-
-        is_map(nested) ->
-          Map.new(nested, fn {k, v} -> {k, truncate_unless_expr(v, inspect_opts)} end)
-
-        is_list(nested) ->
-          Enum.map(nested, fn v -> truncate_unless_expr(v, inspect_opts) end)
-
-        is_tuple(nested) ->
-          nested
-          |> Tuple.to_list()
-          |> Enum.map(&truncate_unless_expr(&1, inspect_opts))
-          |> List.to_tuple()
-
-        true ->
-          truncate_inspect(nested, inspect_opts)
-      end
-    end
-  end
-
-  defp truncate_inspect(v, inspect_opts) do
-    value_str =
-      inspect(v,
-        limit: inspect_opts.limit,
-        printable_limit: inspect_opts.printable_limit,
-        pretty: true
-      )
-
-    truncate(value_str, inspect_opts)
-  end
-
-  defp truncate(value_str, inspect_opts) do
-    if String.length(value_str) > inspect_opts.printable_limit + 3 do
-      String.slice(value_str, 0, inspect_opts.printable_limit) <>
-        "..."
-    else
-      value_str
-    end
   end
 
   @doc false
